@@ -1,4 +1,12 @@
+from pprint import pprint 
+
+import base64
+from io import BytesIO
 from typing import List
+import numpy as np
+import torch
+from segment_anything import sam_model_registry, SamPredictor
+from PIL import Image, ImageColor, ImageEnhance
 
 from prodigy.components.preprocess import fetch_media
 from prodigy.components.stream import get_stream
@@ -45,10 +53,50 @@ function refreshData() {
 }
 """
 
-def event_hook(ctrl, *, example: dict):
-    print(example)
-    example['text'] = 'DINNOSAURRRHEAADDD'
-    return example
+
+def before_db(examples: List[TaskType]) -> List[TaskType]:
+    # Remove all data URIs before storing example in the database
+    for eg in examples:
+        if eg["image"].startswith("data:"):
+            eg["image"] = eg.get("path")
+    return examples
+
+def add_orig_images(examples: List[TaskType]) -> List[TaskType]:
+    for ex in examples:
+        ex['orig_image'] = ex['image']
+        yield ex
+
+def pil_to_alpha_mask(pil_img, color="#770"):
+    imga = pil_img.convert("RGBA")
+    imga = np.asarray(imga) 
+    r, g, b, a = np.rollaxis(imga, axis=-1) # split into 4 n x m arrays 
+    r_m = r > 10 # binary mask for red channel, True for all non white values
+    g_m = g > 10 # binary mask for green channel, True for all non white values
+    b_m = b > 10 # binary mask for blue channel, True for all non white values
+    # combine the three masks using the binary "or" operation 
+    a = a * ((r_m == 1) | (g_m == 1) | (b_m == 1))
+    
+    # Apply new colors too
+    r_new, g_new, b_new = ImageColor.getrgb(color)
+    r = np.ones_like(r) * r_new
+    g = np.ones_like(g) * g_new
+    b = np.ones_like(b) * b_new
+    
+    # stack the img back together 
+    im = Image.fromarray(np.dstack([r, g, b, a]), 'RGBA')
+    alpha = im.split()[3]
+    alpha = ImageEnhance.Brightness(alpha).enhance(.5)
+    im.putalpha(alpha)
+    im.save("debug-mask.png")
+    return im
+
+
+def pil_to_base64(pil):
+    with BytesIO() as buffered:
+        pil.save(buffered, format="JPEG")
+        img_str = base64.b64encode(buffered.getvalue())
+    return f"data:image/png;base64,{img_str.decode('utf-8')}"
+
 
 @recipe(
     "segment.image.manual",
@@ -80,6 +128,10 @@ def segment_image_manual(
     shapes on the image.
     """
     log("RECIPE: Starting recipe image.manual", locals())
+    sam = sam_model_registry["default"]("sam_vit_h_4b8939.pth")
+    predictor = SamPredictor(sam)
+    cache = ""
+
     stream = get_stream(
         source,
         loader=loader,
@@ -91,12 +143,50 @@ def segment_image_manual(
     if not no_fetch and loader != "image-server":
         stream.apply(fetch_media, stream=stream, input_keys=["image"])
 
-    def before_db(examples: List[TaskType]) -> List[TaskType]:
-        # Remove all data URIs before storing example in the database
-        for eg in examples:
-            if eg["image"].startswith("data:"):
-                eg["image"] = eg.get("path")
-        return examples
+    # Because we overwrite the original image when we apply the mask we have to store it separately
+    stream.apply(add_orig_images)
+
+    def event_hook(ctrl, *, example: dict):
+        nonlocal cache
+        log(f"RECIPE: Event hook called input_hash={example['_input_hash']}.")
+        if not example.get("spans", []):
+            log("RECIPE: Example had no spans. Returning example early.")
+            if "orig_image" in example:
+                example["image"] = example["orig_image"]
+            return example 
+        base64_img = example['orig_image'][example['orig_image'].find("base64,") + 7:]
+        pil_image = Image.open(BytesIO(base64.b64decode(base64_img))).convert("RGBA")
+        if cache != example['path']:
+            predictor.set_image(np.array(pil_image.convert("RGB")))
+            print(f"{np.array(pil_image.convert('RGB')).shape=}")
+            cache = example["path"]
+
+        pprint(example['spans'])
+        box_coordinates = [
+            [s['x'], s['y'], s['x'] + s['width'], s['y'] + s['height']] for s in example['spans']
+        ]
+        pprint(box_coordinates)
+        input_boxes = torch.tensor([box_coordinates], device=predictor.device)
+        transformed_boxes = predictor.transform.apply_boxes_torch(input_boxes, np.array(pil_image).shape[:2])
+        masks, _, _ = predictor.predict_torch(
+            point_coords=None,
+            point_labels=None,
+            boxes=transformed_boxes,
+            multimask_output=False,
+        )
+        mask_dict = {}
+        colors = ["#6ad988", "#d36ad9"]
+        for i, mask in enumerate(masks):
+            h, w = mask.shape[-2:]
+            np_mask = (np.array(mask).astype(int).reshape(h, w)  * 255).astype(np.uint8)
+            mask_dict[i] = pil_to_alpha_mask(Image.fromarray(np_mask), color=colors[i])
+            pil_image.paste(mask_dict[i], (0,0), mask=mask_dict[i])
+        
+        pil_image.save("debug-img.png")
+
+        example["image"] = pil_to_base64(pil_image.convert("RGB"))
+        log("RECIPE: segment anything ran.")
+        return example
 
     blocks = [{"view_id": "image_manual"}, {"view_id": "html", "html_template": HTML}]
 
