@@ -215,7 +215,6 @@ def segment_image_manual(
             new_span['mask'] = pil_to_base64(Image.fromarray(np_mask))
             new_spans.append(new_span)
         
-        pil_image.save("debug-img.png")
 
         example["image"] = pil_to_base64(pil_image.convert("RGB"))
         example["spans"] = new_spans
