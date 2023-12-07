@@ -3,15 +3,17 @@ from io import BytesIO
 from typing import List
 import numpy as np
 import torch
-from segment_anything import sam_model_registry, SamPredictor
 from PIL import Image, ImageColor, ImageEnhance
+from pathlib import Path
 
 from prodigy.components.preprocess import fetch_media
 from prodigy.components.stream import get_stream
-from prodigy.core import Arg, recipe
+from prodigy.core import Arg, recipe, Controller
 from prodigy.protocols import ControllerComponentsDict
 from prodigy.types import LabelsType, SourceType, TaskType
-from prodigy.util import log
+from prodigy.util import log, msg
+from segment_anything import sam_model_registry, SamPredictor
+from segment_anything.utils.onnx import SamOnnxModel
 
 
 HTML = """
@@ -118,39 +120,63 @@ def calculate_masks(box_coordinates: List, predictor: SamPredictor, pil_image: I
         boxes=transformed_boxes,
         multimask_output=False,
     )
-    return masks 
+    return masks
+
+def build_onnx_model(sam):
+    return SamOnnxModel(sam, return_single_mask=True)
+
+@recipe("segment.fill-cache",
+    checkpoint=Arg(help="Path to model checkpoint"),
+    model_type=Arg("--model-type", "-mt", help="Model type to use"),
+    cache=Arg("--cache", "-c", help="Location of the diskcache")
+)
+def segment_fill_cache(checkpoint: Path, model_type: str = "default", cache: str = "segment-anything-cache"):
+    log("RECIPE: Starting recipe `segment.to-onnx`", locals())
+    if not checkpoint.exists():
+        msg.fail(f"Path {checkpoint=} does not exist.", exits=True)
+    sam = sam_model_registry[model_type](checkpoint=checkpoint)
+    onnx_sam = build_onnx_model(sam)
+
+
 
 @recipe(
     "segment.image.manual",
     # fmt: off
     dataset=Arg(help="Dataset to save annotations to"),
     source=Arg(help="Data to annotate (directory of images, file path or '-' to read from standard input)"),
+    checkpoint=Arg(help="Path to model checkpoint"),
     label=Arg("--label", "-l", help="Comma-separated label(s) to annotate or text file with one label per line"),
     loader=Arg("--loader", "-lo", help="Loader if source is not directory of images"),
     exclude=Arg("--exclude", "-e", help="Comma-separated list of dataset IDs whose annotations to exclude"),
     darken=Arg("--darken", "-D", help="Darken image to make boxes stand out more"),
     width=Arg("--width", "-w", help="Default width of the annotation card and space for the image (in px)"),
     no_fetch=Arg("--no-fetch", "-NF", help="Don't fetch images as base64"),
-    remove_base64=Arg("--remove-base64", "-R", help="Remove base64-encoded image data before storing example in the DB. (Caution: if enabled, make sure to keep original files!)")
+    remove_base64=Arg("--remove-base64", "-R", help="Remove base64-encoded image data before storing example in the DB. (Caution: if enabled, make sure to keep original files!)"),
+    model_type=Arg("--model-type", "-mt", help="Model type to use"),
     # fmt: on
 )
 def segment_image_manual(
     dataset: str,
     source: SourceType,
     label: LabelsType,
+    checkpoint: Path,
     loader: str = "images",
     exclude: List[str] = [],
     darken: bool = False,
     width: int = 675,
     no_fetch: bool = False,
     remove_base64: bool = False,
+    model_type: str = "default"
 ) -> ControllerComponentsDict:
     """
     Manually annotate images by drawing rectangular bounding boxes or polygon
     shapes on the image.
     """
-    log("RECIPE: Starting recipe image.manual", locals())
-    sam = sam_model_registry["default"]("sam_vit_h_4b8939.pth")
+    log("RECIPE: Starting recipe `segment.image.manual`", locals())
+    if not checkpoint.exists():
+        msg.fail(f"Path {checkpoint=} does not exist.", exits=True)
+
+    sam = sam_model_registry[model_type](str(checkpoint))
     predictor = SamPredictor(sam)
     cache_key = ""
 
@@ -175,7 +201,7 @@ def segment_image_manual(
               "#d2b48c", "#dcdcdc", "#ffff00", ]
     label_2_color = {lab: colors[i] for i, lab in enumerate(label)}
 
-    def event_hook(ctrl, *, example: dict):
+    def event_hook(ctrl: Controller, *, example: dict):
         nonlocal cache_key
         log(f"RECIPE: Event hook called input_hash={example['_input_hash']}.")
         if not example.get("spans", []):
