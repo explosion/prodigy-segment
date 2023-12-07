@@ -1,3 +1,4 @@
+import time 
 import base64
 from io import BytesIO
 from typing import List
@@ -5,7 +6,7 @@ import numpy as np
 import torch
 from PIL import Image, ImageColor, ImageEnhance
 from pathlib import Path
-
+from diskcache import Cache
 from prodigy.components.preprocess import fetch_media
 from prodigy.components.stream import get_stream
 from prodigy.core import Arg, recipe, Controller
@@ -122,21 +123,50 @@ def calculate_masks(box_coordinates: List, predictor: SamPredictor, pil_image: I
     )
     return masks
 
+
 def build_onnx_model(sam):
     return SamOnnxModel(sam, return_single_mask=True)
 
-@recipe("segment.fill-cache",
+
+def encode_image(path: str, cache: Cache):
+    string_path = str(path)
+    if string_path not in cache:
+        tic = time.time()
+        pil_image = PIL.open(string_path).convert("RGB")
+        predictor.set_image(np.array(pil_image))
+        image_embedding = predictor.get_image_embedding().cpu().numpy()
+        cache[string_path] = image_embedding
+        toc = time.time()
+        log(f"ENCODE_IMAGE: {img_path=} encoded. Took {round(toc - tic)}s")
+    return cache[string_path]
+
+
+@recipe("segment.cache",
+    source=Arg(help="Data to annotate (directory of images, file path or '-' to read from standard input)"),
     checkpoint=Arg(help="Path to model checkpoint"),
     model_type=Arg("--model-type", "-mt", help="Model type to use"),
-    cache=Arg("--cache", "-c", help="Location of the diskcache")
+    cache=Arg("--cache", "-c", help="Location of the diskcache"),
+    loader=Arg("--loader", "-lo", help="Loader if source is not directory of images"),
 )
-def segment_fill_cache(checkpoint: Path, model_type: str = "default", cache: str = "segment-anything-cache"):
-    log("RECIPE: Starting recipe `segment.to-onnx`", locals())
+def segment_cache(source: SourceType, checkpoint: Path, model_type: str = "default", cache: str = "segment-anything-cache", loader: str = "images"):
+    """Cache the segment-anything representations to speed up annotation later."""
+    log("RECIPE: Starting recipe `segment.cachefill`", locals())
     if not checkpoint.exists():
         msg.fail(f"Path {checkpoint=} does not exist.", exits=True)
+    log("RECIPE: Loading model")
     sam = sam_model_registry[model_type](checkpoint=checkpoint)
-    onnx_sam = build_onnx_model(sam)
-
+    stream = get_stream(
+        source,
+        loader=loader,
+        dedup=True,
+        rehash=True,
+        input_key="image",
+        is_binary=False,
+    )
+    diskcache = Cache(cache)
+    log("RECIPE: About to check the cache.")
+    for ex in stream:
+        encode_image(ex['image'], cache=diskcache)
 
 
 @recipe(
