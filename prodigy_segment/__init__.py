@@ -70,7 +70,7 @@ def before_db_orig_image(examples: List[TaskType]) -> List[TaskType]:
     for eg in examples: 
         eg["image"] = eg["orig_image"]
         del eg["orig_image"]
-    return examples 
+    return examples
 
 
 def add_orig_images(examples: List[TaskType]) -> List[TaskType]:
@@ -123,11 +123,20 @@ def calculate_masks(box_coordinates: List, predictor: SamPredictor, pil_image: I
     return masks
 
 
+def get_base64_string(example: TaskType):
+    # This looks hacky at first glance, but the reasoning here is that the schema
+    # per https://en.wikipedia.org/wiki/Data_URI_scheme#Syntax looks like this:
+    # data:[<media type>][;charset=<character set>][;base64],<data>
+    # The encoding will always end with base64, so that's the easy place to cut. 
+    # Otherwise we risk assuming a media type or characterset.
+    str_idx = example['image'].find("base64,") + 7
+    return example['image'][str_idx:]
+
+
 def encode_image(example: TaskType, cache: Cache, predictor: SamPredictor):
     if example['path'] not in cache:
         tic = time.time()
-        str_idx = example['image'].find("base64,") + 7
-        base64_img = example['image'][str_idx:]
+        base64_img = get_base64_string(example)
         pil_image = Image.open(BytesIO(base64.b64decode(base64_img))).convert("RGBA")
         # This is an expensive compute, prefer to do only once.
         predictor.set_image(np.array(pil_image.convert("RGB")))
@@ -142,8 +151,6 @@ def encode_image(example: TaskType, cache: Cache, predictor: SamPredictor):
     source=Arg(help="Data to annotate (directory of images, file path or '-' to read from standard input)"),
     checkpoint=Arg(help="Path to model checkpoint"),
     model_type=Arg("--model-type", "-mt", help="Model type to use"),
-    cache=Arg("--cache", "-c", help="Location of the diskcache"),
-    loader=Arg("--loader", "-lo", help="Loader if source is not directory of images"),
     cache=Arg("--cache", "-c", help="Location of the diskcache"),
     loader=Arg("--loader", "-lo", help="Loader if source is not directory of images"),
 )
@@ -208,7 +215,6 @@ def segment_image_manual(
 
     sam = sam_model_registry[model_type](str(checkpoint))
     predictor = SamPredictor(sam)
-    cache_key = ""
     cache = Cache(cache)
 
     stream = get_stream(
@@ -233,7 +239,6 @@ def segment_image_manual(
     label_2_color = {lab: colors[i] for i, lab in enumerate(label)}
 
     def event_hook(ctrl: Controller, *, example: dict):
-        nonlocal cache_key
         nonlocal cache
         log(f"RECIPE: Event hook called input_hash={example['_input_hash']}.")
         if not example.get("spans", []):
@@ -242,20 +247,11 @@ def segment_image_manual(
                 example["image"] = example["orig_image"]
             return example 
 
-        # Load the original image and keep it safe for now
-        base64_img = example['orig_image'][example['orig_image'].find("base64,") + 7:]
+        encode_image(example, cache=cache, predictor=predictor)
+
+        # Load the original image in PIL format so we can calculate masks
+        base64_img = get_base64_string(example)
         pil_image = Image.open(BytesIO(base64.b64decode(base64_img))).convert("RGBA")
-        
-        # Setting a new image is expensive, so we only want to do this once per image
-        if cache_key != example['path']:
-            # This is old code. Keeping around for safekeeps.
-            # predictor.set_image(np.array(pil_image.convert("RGB")))
-
-            encode_image(example, cache=cache, predictor=predictor)
-            log("RECIPE: New image. Running preprocessing for Sam Predictor.")
-            cache_key = example["path"]
-
-        # Generate the masks via PyTorch. Note that `.apply_boxes_torch` is a must!
         box_coordinates = [
             [s['x'], s['y'], s['x'] + s['width'], s['y'] + s['height']] for s in example['spans']
         ]
