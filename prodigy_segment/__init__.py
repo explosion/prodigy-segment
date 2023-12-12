@@ -1,7 +1,7 @@
 import time 
 import base64
 from io import BytesIO
-from typing import List
+from typing import List, Iterable
 import numpy as np
 import torch
 from PIL import Image, ImageColor, ImageEnhance
@@ -65,7 +65,7 @@ def before_db(examples: List[TaskType]) -> List[TaskType]:
     return examples
 
 
-def before_db_orig_image(examples: List[TaskType]) -> List[TaskType]:
+def before_db_orig_image(examples: Iterable[TaskType]) -> Iterable[TaskType]:
     # Check if the `orig_image` is in there and replace if so
     for eg in examples: 
         eg["image"] = eg["orig_image"]
@@ -73,7 +73,7 @@ def before_db_orig_image(examples: List[TaskType]) -> List[TaskType]:
     return examples
 
 
-def add_orig_images(examples: List[TaskType]) -> List[TaskType]:
+def add_orig_images(examples: Iterable[TaskType]) -> Iterable[TaskType]:
     # We temporarily need to override the image to show the masks,
     # but we will need to keep it around for safekeeps, hence this func
     for ex in examples:
@@ -125,14 +125,14 @@ def calculate_masks(box_coordinates: List, predictor: SamPredictor, pil_image: I
     return masks
 
 
-def get_base64_string(example: TaskType):
+def get_base64_string(img_str: str):
     # This looks hacky at first glance, but the reasoning here is that the schema
     # per https://en.wikipedia.org/wiki/Data_URI_scheme#Syntax looks like this:
     # data:[<media type>][;charset=<character set>][;base64],<data>
     # The encoding will always end with base64, so that's the easy place to cut. 
     # Otherwise we risk assuming a media type or characterset.
-    str_idx = example['image'].find("base64,") + 7
-    return example['image'][str_idx:]
+    str_idx = img_str.find("base64,") + 7
+    return img_str[str_idx:]
 
 
 def encode_image(example: TaskType, cache: Cache, predictor: SamPredictor):
@@ -253,7 +253,7 @@ def segment_image_manual(
         encode_image(example, cache=cache, predictor=predictor)
 
         # Load the original image in PIL format so we can calculate masks
-        base64_img = get_base64_string(example)
+        base64_img = get_base64_string(example["orig_image"])
         pil_image = Image.open(BytesIO(base64.b64decode(base64_img))).convert("RGBA")
         box_coordinates = [
             [s['x'], s['y'], s['x'] + s['width'], s['y'] + s['height']] for s in example['spans']
