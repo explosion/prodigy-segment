@@ -108,7 +108,7 @@ def pil_to_alpha_mask(pil_img, color="#770"):
 
 def pil_to_base64(pil):
     with BytesIO() as buffered:
-        pil.save(buffered, format="JPEG")
+        pil.save(buffered, format="PNG")
         img_str = base64.b64encode(buffered.getvalue())
     return f"data:image/png;base64,{img_str.decode('utf-8')}"
 
