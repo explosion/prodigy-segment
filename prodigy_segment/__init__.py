@@ -1,3 +1,4 @@
+import time
 import base64
 from io import BytesIO
 from typing import List
@@ -5,6 +6,8 @@ import numpy as np
 import torch
 from PIL import Image, ImageColor, ImageEnhance
 from pathlib import Path
+from diskcache import Cache 
+
 
 from prodigy.components.preprocess import fetch_media
 from prodigy.components.stream import get_stream
@@ -12,8 +15,7 @@ from prodigy.core import Arg, recipe, Controller
 from prodigy.protocols import ControllerComponentsDict
 from prodigy.types import LabelsType, SourceType, TaskType
 from prodigy.util import log, msg
-from segment_anything import sam_model_registry, SamPredictor
-from segment_anything.utils.onnx import SamOnnxModel
+from prodigy_segment.segment_anything import sam_model_registry, SamPredictor
 
 
 HTML = """
@@ -122,21 +124,46 @@ def calculate_masks(box_coordinates: List, predictor: SamPredictor, pil_image: I
     )
     return masks
 
-def build_onnx_model(sam):
-    return SamOnnxModel(sam, return_single_mask=True)
+
+def encode_image(example: TaskType, cache: Cache, predictor: SamPredictor):
+    if example['path'] not in cache:
+        tic = time.time()
+        str_idx = example['image'].find("base64,") + 7
+        base64_img = example['image'][str_idx:]
+        pil_image = Image.open(BytesIO(base64.b64decode(base64_img))).convert("RGBA")
+        # This is an expensive compute, prefer to do only once.
+        predictor.set_image(np.array(pil_image.convert("RGB")))
+        cache[example['path']] = predictor.get_image_embedding()
+        toc = time.time()
+        log(f"ENCODE: Encoded {example['path']}. Took {int(toc - tic)}s.")
+    predictor.set_image_embedding(*cache[example['path']])
+    return cache[example['path']]
+
 
 @recipe("segment.fill-cache",
+    source=Arg(help="Data to annotate (directory of images, file path or '-' to read from standard input)"),
     checkpoint=Arg(help="Path to model checkpoint"),
     model_type=Arg("--model-type", "-mt", help="Model type to use"),
-    cache=Arg("--cache", "-c", help="Location of the diskcache")
+    cache=Arg("--cache", "-c", help="Location of the diskcache"),
+    loader=Arg("--loader", "-lo", help="Loader if source is not directory of images"),
 )
-def segment_fill_cache(checkpoint: Path, model_type: str = "default", cache: str = "segment-anything-cache"):
+def segment_fill_cache(source: SourceType, checkpoint: Path, model_type: str = "default", cache: str = "segment-anything-cache", loader: str = "images"):
     log("RECIPE: Starting recipe `segment.to-onnx`", locals())
     if not checkpoint.exists():
         msg.fail(f"Path {checkpoint=} does not exist.", exits=True)
     sam = sam_model_registry[model_type](checkpoint=checkpoint)
-    onnx_sam = build_onnx_model(sam)
-
+    predictor = SamPredictor(sam)
+    cache = Cache(cache)
+    stream = get_stream(
+        source,
+        loader=loader,
+        dedup=True,
+        rehash=True,
+        input_key="image",
+        is_binary=False,
+    )
+    for example in stream:
+        encode_image(example, cache, predictor)
 
 
 @recipe(
@@ -153,20 +180,22 @@ def segment_fill_cache(checkpoint: Path, model_type: str = "default", cache: str
     no_fetch=Arg("--no-fetch", "-NF", help="Don't fetch images as base64"),
     remove_base64=Arg("--remove-base64", "-R", help="Remove base64-encoded image data before storing example in the DB. (Caution: if enabled, make sure to keep original files!)"),
     model_type=Arg("--model-type", "-mt", help="Model type to use"),
+    cache=Arg("--cache", "-c", help="Location of the diskcache"),
     # fmt: on
 )
 def segment_image_manual(
     dataset: str,
     source: SourceType,
-    label: LabelsType,
     checkpoint: Path,
+    label: LabelsType,
     loader: str = "images",
     exclude: List[str] = [],
     darken: bool = False,
     width: int = 675,
     no_fetch: bool = False,
     remove_base64: bool = False,
-    model_type: str = "default"
+    model_type: str = "default",
+    cache: str = "segment-anything-cache",
 ) -> ControllerComponentsDict:
     """
     Manually annotate images by drawing rectangular bounding boxes or polygon
@@ -179,6 +208,7 @@ def segment_image_manual(
     sam = sam_model_registry[model_type](str(checkpoint))
     predictor = SamPredictor(sam)
     cache_key = ""
+    cache = Cache(cache)
 
     stream = get_stream(
         source,
@@ -203,6 +233,7 @@ def segment_image_manual(
 
     def event_hook(ctrl: Controller, *, example: dict):
         nonlocal cache_key
+        nonlocal cache
         log(f"RECIPE: Event hook called input_hash={example['_input_hash']}.")
         if not example.get("spans", []):
             log("RECIPE: Example had no spans. Returning example early.")
@@ -216,7 +247,10 @@ def segment_image_manual(
         
         # Setting a new image is expensive, so we only want to do this once per image
         if cache_key != example['path']:
-            predictor.set_image(np.array(pil_image.convert("RGB")))
+            # This is old code. Keeping around for safekeeps.
+            # predictor.set_image(np.array(pil_image.convert("RGB")))
+
+            encode_image(example, cache=cache, predictor=predictor)
             log("RECIPE: New image. Running preprocessing for Sam Predictor.")
             cache_key = example["path"]
 
