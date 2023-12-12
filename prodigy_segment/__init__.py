@@ -74,6 +74,8 @@ def before_db_orig_image(examples: List[TaskType]) -> List[TaskType]:
 
 
 def add_orig_images(examples: List[TaskType]) -> List[TaskType]:
+    # We temporarily need to override the image to show the masks,
+    # but we will need to keep it around for safekeeps, hence this func
     for ex in examples:
         ex['orig_image'] = ex['image']
         yield ex
@@ -134,6 +136,7 @@ def get_base64_string(example: TaskType):
 
 
 def encode_image(example: TaskType, cache: Cache, predictor: SamPredictor):
+    """Encodes the image while also checking the cache."""
     if example['path'] not in cache:
         tic = time.time()
         base64_img = get_base64_string(example)
