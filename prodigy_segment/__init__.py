@@ -1,4 +1,4 @@
-import time
+import time 
 import base64
 from io import BytesIO
 from typing import List
@@ -6,9 +6,7 @@ import numpy as np
 import torch
 from PIL import Image, ImageColor, ImageEnhance
 from pathlib import Path
-from diskcache import Cache 
-
-
+from diskcache import Cache
 from prodigy.components.preprocess import fetch_media
 from prodigy.components.stream import get_stream
 from prodigy.core import Arg, recipe, Controller
@@ -146,11 +144,14 @@ def encode_image(example: TaskType, cache: Cache, predictor: SamPredictor):
     model_type=Arg("--model-type", "-mt", help="Model type to use"),
     cache=Arg("--cache", "-c", help="Location of the diskcache"),
     loader=Arg("--loader", "-lo", help="Loader if source is not directory of images"),
+    cache=Arg("--cache", "-c", help="Location of the diskcache"),
+    loader=Arg("--loader", "-lo", help="Loader if source is not directory of images"),
 )
 def segment_fill_cache(source: SourceType, checkpoint: Path, model_type: str = "default", cache: str = "segment-anything-cache", loader: str = "images"):
     log("RECIPE: Starting recipe `segment.to-onnx`", locals())
     if not checkpoint.exists():
         msg.fail(f"Path {checkpoint=} does not exist.", exits=True)
+    log("RECIPE: Loading model")
     sam = sam_model_registry[model_type](checkpoint=checkpoint)
     predictor = SamPredictor(sam)
     cache = Cache(cache)
