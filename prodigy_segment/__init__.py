@@ -1,17 +1,19 @@
+import time 
 import base64
 from io import BytesIO
-from typing import List
+from typing import List, Iterable
 import numpy as np
 import torch
-from segment_anything import sam_model_registry, SamPredictor
 from PIL import Image, ImageColor, ImageEnhance
-
+from pathlib import Path
+from diskcache import Cache
 from prodigy.components.preprocess import fetch_media
 from prodigy.components.stream import get_stream
-from prodigy.core import Arg, recipe
+from prodigy.core import Arg, recipe, Controller
 from prodigy.protocols import ControllerComponentsDict
 from prodigy.types import LabelsType, SourceType, TaskType
-from prodigy.util import log
+from prodigy.util import log, msg
+from prodigy_segment.segment_anything import sam_model_registry, SamPredictor
 
 
 HTML = """
@@ -63,15 +65,17 @@ def before_db(examples: List[TaskType]) -> List[TaskType]:
     return examples
 
 
-def before_db_orig_image(examples: List[TaskType]) -> List[TaskType]:
+def before_db_orig_image(examples: Iterable[TaskType]) -> Iterable[TaskType]:
     # Check if the `orig_image` is in there and replace if so
     for eg in examples: 
         eg["image"] = eg["orig_image"]
         del eg["orig_image"]
-    return examples 
+    return examples
 
 
-def add_orig_images(examples: List[TaskType]) -> List[TaskType]:
+def add_orig_images(examples: Iterable[TaskType]) -> Iterable[TaskType]:
+    # We temporarily need to override the image to show the masks,
+    # but we will need to keep it around for safekeeps, hence this func
     for ex in examples:
         ex['orig_image'] = ex['image']
         yield ex
@@ -104,7 +108,7 @@ def pil_to_alpha_mask(pil_img, color="#770"):
 
 def pil_to_base64(pil):
     with BytesIO() as buffered:
-        pil.save(buffered, format="JPEG")
+        pil.save(buffered, format="PNG")
         img_str = base64.b64encode(buffered.getvalue())
     return f"data:image/png;base64,{img_str.decode('utf-8')}"
 
@@ -118,25 +122,82 @@ def calculate_masks(box_coordinates: List, predictor: SamPredictor, pil_image: I
         boxes=transformed_boxes,
         multimask_output=False,
     )
-    return masks 
+    return masks
+
+
+def get_base64_string(img_str: str):
+    # This looks hacky at first glance, but the reasoning here is that the schema
+    # per https://en.wikipedia.org/wiki/Data_URI_scheme#Syntax looks like this:
+    # data:[<media type>][;charset=<character set>][;base64],<data>
+    # The encoding will always end with base64, so that's the easy place to cut. 
+    # Otherwise we risk assuming a media type or characterset.
+    str_idx = img_str.find("base64,") + 7
+    return img_str[str_idx:]
+
+
+def encode_image(example: TaskType, cache: Cache, predictor: SamPredictor):
+    """Encodes the image while also checking the cache."""
+    if example['path'] not in cache:
+        tic = time.time()
+        base64_img = get_base64_string(example)
+        pil_image = Image.open(BytesIO(base64.b64decode(base64_img))).convert("RGBA")
+        # This is an expensive compute, prefer to do only once.
+        predictor.set_image(np.array(pil_image.convert("RGB")))
+        cache[example['path']] = predictor.get_image_embedding()
+        toc = time.time()
+        log(f"ENCODE: Encoded {example['path']}. Took {int(toc - tic)}s.")
+    predictor.set_image_embedding(*cache[example['path']])
+    return cache[example['path']]
+
+
+@recipe("segment.fill-cache",
+    source=Arg(help="Data to annotate (directory of images, file path or '-' to read from standard input)"),
+    checkpoint=Arg(help="Path to model checkpoint"),
+    model_type=Arg("--model-type", "-mt", help="Model type to use"),
+    cache=Arg("--cache", "-c", help="Location of the diskcache"),
+    loader=Arg("--loader", "-lo", help="Loader if source is not directory of images"),
+)
+def segment_fill_cache(source: SourceType, checkpoint: Path, model_type: str = "default", cache: str = "segment-anything-cache", loader: str = "images"):
+    log("RECIPE: Starting recipe `segment.to-onnx`", locals())
+    if not checkpoint.exists():
+        msg.fail(f"Path {checkpoint=} does not exist.", exits=True)
+    log("RECIPE: Loading model")
+    sam = sam_model_registry[model_type](checkpoint=checkpoint)
+    predictor = SamPredictor(sam)
+    cache = Cache(cache)
+    stream = get_stream(
+        source,
+        loader=loader,
+        dedup=True,
+        rehash=True,
+        input_key="image",
+        is_binary=False,
+    )
+    for example in stream:
+        encode_image(example, cache, predictor)
+
 
 @recipe(
     "segment.image.manual",
     # fmt: off
     dataset=Arg(help="Dataset to save annotations to"),
     source=Arg(help="Data to annotate (directory of images, file path or '-' to read from standard input)"),
+    checkpoint=Arg(help="Path to model checkpoint"),
     label=Arg("--label", "-l", help="Comma-separated label(s) to annotate or text file with one label per line"),
     loader=Arg("--loader", "-lo", help="Loader if source is not directory of images"),
     exclude=Arg("--exclude", "-e", help="Comma-separated list of dataset IDs whose annotations to exclude"),
     darken=Arg("--darken", "-D", help="Darken image to make boxes stand out more"),
     width=Arg("--width", "-w", help="Default width of the annotation card and space for the image (in px)"),
     no_fetch=Arg("--no-fetch", "-NF", help="Don't fetch images as base64"),
-    remove_base64=Arg("--remove-base64", "-R", help="Remove base64-encoded image data before storing example in the DB. (Caution: if enabled, make sure to keep original files!)")
+    remove_base64=Arg("--remove-base64", "-R", help="Remove base64-encoded image data before storing example in the DB. (Caution: if enabled, make sure to keep original files!)"),
+    model_type=Arg("--model-type", "-mt", help="Model type to use"),
+    cache=Arg("--cache", "-c", help="Location of the diskcache"),
     # fmt: on
 )
 def segment_image_manual(
     dataset: str,
     source: SourceType,
+    checkpoint: Path,
     label: LabelsType,
     loader: str = "images",
     exclude: List[str] = [],
@@ -144,15 +205,20 @@ def segment_image_manual(
     width: int = 675,
     no_fetch: bool = False,
     remove_base64: bool = False,
+    model_type: str = "default",
+    cache: str = "segment-anything-cache",
 ) -> ControllerComponentsDict:
     """
     Manually annotate images by drawing rectangular bounding boxes or polygon
     shapes on the image.
     """
-    log("RECIPE: Starting recipe image.manual", locals())
-    sam = sam_model_registry["default"]("sam_vit_h_4b8939.pth")
+    log("RECIPE: Starting recipe `segment.image.manual`", locals())
+    if not checkpoint.exists():
+        msg.fail(f"Path {checkpoint=} does not exist.", exits=True)
+
+    sam = sam_model_registry[model_type](str(checkpoint))
     predictor = SamPredictor(sam)
-    cache_key = ""
+    cache = Cache(cache)
 
     stream = get_stream(
         source,
@@ -175,8 +241,8 @@ def segment_image_manual(
               "#d2b48c", "#dcdcdc", "#ffff00", ]
     label_2_color = {lab: colors[i] for i, lab in enumerate(label)}
 
-    def event_hook(ctrl, *, example: dict):
-        nonlocal cache_key
+    def event_hook(ctrl: Controller, *, example: dict):
+        nonlocal cache
         log(f"RECIPE: Event hook called input_hash={example['_input_hash']}.")
         if not example.get("spans", []):
             log("RECIPE: Example had no spans. Returning example early.")
@@ -184,17 +250,11 @@ def segment_image_manual(
                 example["image"] = example["orig_image"]
             return example 
 
-        # Load the original image and keep it safe for now
-        base64_img = example['orig_image'][example['orig_image'].find("base64,") + 7:]
-        pil_image = Image.open(BytesIO(base64.b64decode(base64_img))).convert("RGBA")
-        
-        # Setting a new image is expensive, so we only want to do this once per image
-        if cache_key != example['path']:
-            predictor.set_image(np.array(pil_image.convert("RGB")))
-            log("RECIPE: New image. Running preprocessing for Sam Predictor.")
-            cache_key = example["path"]
+        encode_image(example, cache=cache, predictor=predictor)
 
-        # Generate the masks via PyTorch. Note that `.apply_boxes_torch` is a must!
+        # Load the original image in PIL format so we can calculate masks
+        base64_img = get_base64_string(example["orig_image"])
+        pil_image = Image.open(BytesIO(base64.b64decode(base64_img))).convert("RGBA")
         box_coordinates = [
             [s['x'], s['y'], s['x'] + s['width'], s['y'] + s['height']] for s in example['spans']
         ]
