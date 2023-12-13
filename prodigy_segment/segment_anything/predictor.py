@@ -8,7 +8,7 @@ import numpy as np
 import torch
 from diskcache import Cache
 
-from segment_anything.modeling import Sam
+from .modeling import Sam
 
 from typing import Optional, Tuple
 
