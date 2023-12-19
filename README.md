@@ -7,7 +7,7 @@ This repository contains a Prodigy plugin for recipes that involve Metas [Segmen
 You can install this plugin via `pip`. 
 
 ```
-pip install "prodigy-ann @ git+https://github.com/explosion/prodigy-segment"
+pip install "prodigy-segment @ git+https://github.com/explosion/prodigy-segment"
 ```
 
 To learn more about this plugin, you can check the [Prodigy docs](https://prodi.gy/docs/plugins/#segment).

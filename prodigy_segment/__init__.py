@@ -139,7 +139,7 @@ def encode_image(example: TaskType, cache: Cache, predictor: SamPredictor):
     """Encodes the image while also checking the cache."""
     if example['path'] not in cache:
         tic = time.time()
-        base64_img = get_base64_string(example)
+        base64_img = get_base64_string(example["image"])
         pil_image = Image.open(BytesIO(base64.b64decode(base64_img))).convert("RGBA")
         # This is an expensive compute, prefer to do only once.
         predictor.set_image(np.array(pil_image.convert("RGB")))
