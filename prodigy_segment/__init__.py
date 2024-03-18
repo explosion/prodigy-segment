@@ -183,7 +183,7 @@ def segment_fill_cache(source: SourceType, checkpoint: Path, model_type: str = "
     dataset=Arg(help="Dataset to save annotations to"),
     source=Arg(help="Data to annotate (directory of images, file path or '-' to read from standard input)"),
     checkpoint=Arg(help="Path to model checkpoint"),
-    labels=Arg("--label", "-l", help="Comma-separated label(s) to annotate or text file with one label per line"),
+    labels=Arg("--labels", "-l", help="Comma-separated label(s) to annotate or text file with one label per line"),
     loader=Arg("--loader", "-lo", help="Loader if source is not directory of images"),
     exclude=Arg("--exclude", "-e", help="Comma-separated list of dataset IDs whose annotations to exclude"),
     darken=Arg("--darken", "-D", help="Darken image to make boxes stand out more"),
