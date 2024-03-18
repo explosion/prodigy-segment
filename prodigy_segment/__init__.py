@@ -185,7 +185,7 @@ def segment_fill_cache(source: SourceType, checkpoint: Path, model_type: str = "
     dataset=Arg(help="Dataset to save annotations to"),
     source=Arg(help="Data to annotate (directory of images, file path or '-' to read from standard input)"),
     checkpoint=Arg(help="Path to model checkpoint"),
-    labels=Arg("--labels", "-l", help="Comma-separated label(s) to annotate or text file with one label per line"),
+    label=Arg("--label", "-l", help="Comma-separated label(s) to annotate or text file with one label per line"),
     loader=Arg("--loader", "-lo", help="Loader if source is not directory of images"),
     exclude=Arg("--exclude", "-e", help="Comma-separated list of dataset IDs whose annotations to exclude"),
     darken=Arg("--darken", "-D", help="Darken image to make boxes stand out more"),
@@ -200,7 +200,7 @@ def segment_image_manual(
     dataset: str,
     source: SourceType,
     checkpoint: Path,
-    labels: LabelsType,
+    label: LabelsType,
     loader: str = "images",
     exclude: List[str] = [],
     darken: bool = False,
@@ -241,7 +241,7 @@ def segment_image_manual(
     colors = ["#00ffff", "#ff00ff", "#00ff7f", "#ff6347", "#00bfff",
               "#ffa500", "#ff69b4", "#7fffd4", "#ffd700", "#ffdab9", "#adff2f", 
               "#d2b48c", "#dcdcdc", "#ffff00", ]
-    label_2_color = {lab: colors[i] for i, lab in enumerate(labels)}
+    label_2_color = {lab: colors[i] for i, lab in enumerate(label)}
 
     def event_hook(ctrl: Controller, *, example: dict):
         nonlocal cache
@@ -292,7 +292,7 @@ def segment_image_manual(
         "before_db": before_db if remove_base64 else before_db_orig_image,
         "exclude": exclude,
         "config": {
-            "labels": labels,
+            "labels": label,
             "blocks": blocks,
             "darken_image": 0.3 if darken else 0,
             "exclude_by": "input",
