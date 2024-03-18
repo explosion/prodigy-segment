@@ -15,6 +15,7 @@ from prodigy.types import LabelsType, SourceType, TaskType
 from prodigy.util import log, msg
 from prodigy_segment.segment_anything import sam_model_registry, SamPredictor
 
+from typing import Dict
 
 HTML = """
 <link
@@ -125,12 +126,13 @@ def calculate_masks(box_coordinates: List, predictor: SamPredictor, pil_image: I
     return masks
 
 
-def get_base64_string(img_str: str):
+def get_base64_string(img_dict: Dict[str, str]):
     # This looks hacky at first glance, but the reasoning here is that the schema
     # per https://en.wikipedia.org/wiki/Data_URI_scheme#Syntax looks like this:
     # data:[<media type>][;charset=<character set>][;base64],<data>
     # The encoding will always end with base64, so that's the easy place to cut. 
-    # Otherwise we risk assuming a media type or characterset.
+    # Otherwise we risk assuming a media type or characterset.    
+    img_str = img_dict["image"]
     str_idx = img_str.find("base64,") + 7
     return img_str[str_idx:]
 
