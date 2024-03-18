@@ -15,22 +15,18 @@ jobs:
         uses: actions/setup-python@v4
         with:
           python-version: "3.10"
-
-      - name: Check out Prodigy
-        uses: actions/checkout@v3
-        with:
-          repository: explosion/prodigy
-          ref: v1.14.11
-          path: ./prodigy
-          ssh-key: ${{ secrets.GHA_PRODIGY_READ }}
-
-      - name: Install prodigy
+      - name: Install Prodigy from private repo
+        env:
+          GITHUB_TOKEN: ${{ secrets.GHA_PRODIGY_READ }} # Use the secret here
         run: |
-          ls -la
-          pip install ./prodigy
-          python -m prodigy --help
-
-      - name: Install dependencies
+          export GIT_LFS_SKIP_SMUDGE=1 
+          pip install --upgrade pip
+          git clone https://x-access-token:${GITHUB_TOKEN}@github.com/explosion/prodigy.git
+          cd prodigy
+          pip install setuptools wheel
+          pip install -e .
+          cd ..
+      - name: Install additional dependencies
         run: |
           pip install --upgrade pip
           pip install -e .
@@ -45,3 +41,5 @@ jobs:
         if: always()
         shell: bash
         run: python -m pytest tests
+      
+     
